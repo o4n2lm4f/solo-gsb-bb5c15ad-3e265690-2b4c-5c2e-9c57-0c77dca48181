@@ -9,6 +9,7 @@
   var COLORS = ['#ef4444', '#38bdf8', '#22c55e', '#facc15', '#a78bfa', '#fb923c', '#f472b6', '#2dd4bf'];
   var KEY_HIT_PX = 9;      // 走位点命中半径（屏幕像素）
   var TICK_HIT_PX = 7;     // 时间轴时刻柄命中半径
+  var NEW_OBS_SIZE = 120;  // 单击画布新增禁入矩形的默认边长
 
   var canvas = document.getElementById('stage');
   var ctx = canvas.getContext('2d');
@@ -18,8 +19,11 @@
   var state = {
     duration: 12,
     performers: [],
+    obstacles: [],
     selectedPid: null,
     selectedKey: null,      // {pid, index}
+    selectedObstacleId: null,
+    addObstacleMode: false, // 下一次在画布拖出/单击投放禁入矩形
     time: 0,
     playing: false,
     speed: 1,
@@ -34,6 +38,10 @@
 
   function getPerformer(pid) {
     return state.performers.find(function (p) { return p.id === pid; }) || null;
+  }
+
+  function getObstacle(oid) {
+    return state.obstacles.find(function (o) { return o.id === oid; }) || null;
   }
 
   // ---------- 场景装载 ----------
@@ -58,9 +66,19 @@
         })
       };
     });
+    // 禁入矩形经引擎同一规整（坐标/尺寸钳制、缺省 id/name 补全）
+    state.obstacles = Core.normalizeObstacles(scene.obstacles).map(function (o) {
+      o.x = Math.round(o.x);
+      o.y = Math.round(o.y);
+      o.width = Math.round(o.width);
+      o.height = Math.round(o.height);
+      return o;
+    });
     state.selectedPid = state.performers[0] ? state.performers[0].id : null;
     state.selectedKey = null;
+    state.selectedObstacleId = null;
     state.activePairKey = null;
+    setAddObstacleMode(false);
     state.time = opts.keepTime ? Math.min(state.time, state.duration) : 0;
     state.playing = false;
     document.getElementById('duration-input').value = state.duration;
@@ -93,10 +111,12 @@
   function recompute() {
     state.analysis = Core.analyzeScene({
       duration: state.duration,
-      performers: state.performers
+      performers: state.performers,
+      obstacles: state.obstacles
     });
     renderSummary();
     renderPairs();
+    renderObstacleResults();
     renderTimelineDanger();
     updatePlayhead();
   }
@@ -119,6 +139,17 @@
   }
 
   // ---------- 命中检测 ----------
+  function hitTestObstacle(wx, wy) {
+    // 后画的（列表末尾）在上层，优先命中
+    for (var i = state.obstacles.length - 1; i >= 0; i--) {
+      var o = state.obstacles[i];
+      if (wx >= o.x && wx <= o.x + o.width && wy >= o.y && wy <= o.y + o.height) {
+        return o;
+      }
+    }
+    return null;
+  }
+
   function hitTestKey(wx, wy) {
     var v = view();
     var tolX = KEY_HIT_PX / v.sx;
@@ -146,10 +177,43 @@
   canvas.addEventListener('pointerdown', function (e) {
     if (e.button !== 0) return;
     var w = toWorld(e.clientX, e.clientY);
+
+    // 禁入区新增模式：拖出矩形（单击则投放默认尺寸）
+    if (state.addObstacleMode) {
+      state.drag = {
+        type: 'obs-new',
+        x0: w.x,
+        y0: w.y,
+        x1: w.x,
+        y1: w.y,
+        moved: false
+      };
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
+
+    var hitObs = hitTestObstacle(w.x, w.y);
+    if (hitObs) {
+      state.selectedObstacleId = hitObs.id;
+      state.selectedKey = null;
+      state.drag = {
+        type: 'obstacle',
+        oid: hitObs.id,
+        offX: w.x - hitObs.x,
+        offY: w.y - hitObs.y,
+        moved: false
+      };
+      canvas.setPointerCapture(e.pointerId);
+      renderPerformers();
+      draw();
+      return;
+    }
+
     var hit = hitTestKey(w.x, w.y);
     if (hit) {
       state.selectedPid = hit.pid;
       state.selectedKey = { pid: hit.pid, index: hit.index };
+      state.selectedObstacleId = null;
       var p = getPerformer(hit.pid);
       state.drag = {
         type: 'key',
@@ -163,14 +227,37 @@
       draw();
     } else if (state.selectedPid) {
       // 空白按下：准备新增走位点（pointerup 未移动则加入）
+      state.selectedObstacleId = null;
       state.drag = { type: 'new', x: w.x, y: w.y, moved: false };
       canvas.setPointerCapture(e.pointerId);
+      draw();
     }
   });
 
   canvas.addEventListener('pointermove', function (e) {
     var w = toWorld(e.clientX, e.clientY);
     var v = view();
+
+    if (state.drag && state.drag.type === 'obs-new') {
+      if (Math.abs(w.x - state.drag.x0) * v.sx > 4 || Math.abs(w.y - state.drag.y0) * v.sy > 4) {
+        state.drag.moved = true;
+      }
+      state.drag.x1 = w.x;
+      state.drag.y1 = w.y;
+      draw();
+      return;
+    }
+
+    if (state.drag && state.drag.type === 'obstacle') {
+      var o = getObstacle(state.drag.oid);
+      if (!o) return;
+      state.drag.moved = true;
+      o.x = clamp(Math.round(w.x - state.drag.offX), 0, Math.max(0, WORLD_W - o.width));
+      o.y = clamp(Math.round(w.y - state.drag.offY), 0, Math.max(0, WORLD_H - o.height));
+      recompute();
+      draw();
+      return;
+    }
 
     if (state.drag && state.drag.type === 'key') {
       state.drag.moved = true;
@@ -192,8 +279,22 @@
     }
 
     // 悬停命中提示
+    if (state.addObstacleMode) {
+      canvas.style.cursor = 'crosshair';
+      tooltip.hidden = true;
+      return;
+    }
+    var hoverObs = hitTestObstacle(w.x, w.y);
     var hover = hitTestKey(w.x, w.y);
-    if (hover) {
+    if (hoverObs) {
+      canvas.style.cursor = 'move';
+      var intruders = currentObstacleIntruders(state.time)[hoverObs.id];
+      tooltip.hidden = false;
+      tooltip.textContent = hoverObs.name + ' · 禁入矩形 (' + Math.round(hoverObs.x) + ', ' +
+        Math.round(hoverObs.y) + ') ' + Math.round(hoverObs.width) + '×' + Math.round(hoverObs.height) +
+        (intruders ? ' · 当前侵入 ' + intruders : ' · 拖动移位 · 右键删除');
+      positionTooltip(e);
+    } else if (hover) {
       canvas.style.cursor = 'grab';
       var hp = getPerformer(hover.pid);
       var hk = hp.keys[hover.index];
@@ -204,13 +305,28 @@
     }
   });
 
+  function positionTooltip(e) {
+    var wrapRect = canvas.parentElement.getBoundingClientRect();
+    tooltip.style.left = (e.clientX - wrapRect.left) + 'px';
+    tooltip.style.top = (e.clientY - wrapRect.top) + 'px';
+  }
+
   canvas.addEventListener('pointerup', function (e) {
     if (!state.drag) return;
-    if (state.drag.type === 'new' && !state.drag.moved && state.selectedPid) {
+    var drag = state.drag;
+    if (drag.type === 'obs-new') {
       var w2 = toWorld(e.clientX, e.clientY);
-      addKey(state.selectedPid, state.time, w2.x, w2.y);
+      if (drag.moved) {
+        addObstacleRect(drag.x0, drag.y0, w2.x, w2.y);
+      } else {
+        // 单击：以落点附近为左上角投放默认尺寸矩形（自动收回画布内）
+        addObstacleRect(w2.x, w2.y, w2.x + NEW_OBS_SIZE, w2.y + NEW_OBS_SIZE);
+      }
+    } else if (drag.type === 'new' && !drag.moved && state.selectedPid) {
+      var w3 = toWorld(e.clientX, e.clientY);
+      addKey(state.selectedPid, state.time, w3.x, w3.y);
     }
-    if (state.drag.type === 'key') {
+    if (drag.type === 'key') {
       tooltip.hidden = true;
     }
     state.drag = null;
@@ -224,17 +340,22 @@
 
   // 双击空白：在当前播放时刻为选中者加帧（与单击新增并存，双击更直观）
   canvas.addEventListener('dblclick', function (e) {
-    if (!state.selectedPid) return;
+    if (state.addObstacleMode || !state.selectedPid) return;
     var w = toWorld(e.clientX, e.clientY);
-    var hit = hitTestKey(w.x, w.y);
-    if (hit) return;
+    if (hitTestObstacle(w.x, w.y)) return;
+    if (hitTestKey(w.x, w.y)) return;
     addKey(state.selectedPid, state.time, w.x, w.y);
   });
 
-  // 右键圆点：删除该走位点（每人保留至少 1 帧）
+  // 右键圆点：删除该走位点（每人保留至少 1 帧）；右键禁入矩形：删除该矩形
   canvas.addEventListener('contextmenu', function (e) {
     e.preventDefault();
     var w = toWorld(e.clientX, e.clientY);
+    var hitObs = hitTestObstacle(w.x, w.y);
+    if (hitObs) {
+      removeObstacle(hitObs.id);
+      return;
+    }
     var hit = hitTestKey(w.x, w.y);
     if (hit) {
       removeKey(hit.pid, hit.index);
@@ -247,11 +368,7 @@
     tooltip.textContent = p.name + ' · t=' + k.t.toFixed(1) + 's · (' +
       Math.round(k.x) + ', ' + Math.round(k.y) + ') · 安全半径 ' + keyRadius(p, k) +
       (custom ? '（关键帧）' : '（继承 ' + p.radius + '）');
-    var rect = canvas.getBoundingClientRect();
-    var wrapRect = canvas.parentElement.getBoundingClientRect();
-    tooltip.style.left = (e.clientX - wrapRect.left) + 'px';
-    tooltip.style.top = (e.clientY - wrapRect.top) + 'px';
-    void rect;
+    positionTooltip(e);
   }
 
   function addKey(pid, t, x, y) {
@@ -361,6 +478,109 @@
     return Math.min(hi, Math.max(lo, v));
   }
 
+  // ---------- 禁入矩形：新增 / 删除 / 编辑 ----------
+  var btnObstacle = document.getElementById('btn-obstacle');
+  var obstacleEditorEl = document.getElementById('obstacle-editor');
+  var oeInfoEl = document.getElementById('oe-info');
+  var oeNameInput = document.getElementById('oe-name');
+  var oeWidthInput = document.getElementById('oe-width');
+  var oeHeightInput = document.getElementById('oe-height');
+  var oeDeleteBtn = document.getElementById('oe-delete');
+
+  function setAddObstacleMode(on) {
+    state.addObstacleMode = !!on;
+    btnObstacle.classList.toggle('active', state.addObstacleMode);
+    btnObstacle.textContent = state.addObstacleMode ? '✕ 取消禁入区' : '＋ 禁入区';
+    canvas.style.cursor = state.addObstacleMode ? 'crosshair' : '';
+  }
+
+  btnObstacle.addEventListener('click', function () {
+    setAddObstacleMode(!state.addObstacleMode);
+  });
+
+  function addObstacleRect(x0, y0, x1, y1) {
+    var x = clamp(Math.round(Math.min(x0, x1)), 0, WORLD_W);
+    var y = clamp(Math.round(Math.min(y0, y1)), 0, WORLD_H);
+    var right = clamp(Math.round(Math.max(x0, x1)), 0, WORLD_W);
+    var bottom = clamp(Math.round(Math.max(y0, y1)), 0, WORLD_H);
+    var width = right - x;
+    var height = bottom - y;
+    // 单击或极小拖框：视为默认尺寸，以落点为中心收回画布内
+    if (width < 4 || height < 4) {
+      width = NEW_OBS_SIZE;
+      height = NEW_OBS_SIZE;
+      x = clamp(x - Math.round(NEW_OBS_SIZE / 2), 0, WORLD_W - width);
+      y = clamp(y - Math.round(NEW_OBS_SIZE / 2), 0, WORLD_H - height);
+    }
+    var normalized = Core.normalizeObstacles([{ x: x, y: y, width: width, height: height }])[0];
+    state.obstacles.push(normalized);
+    state.selectedObstacleId = normalized.id;
+    state.selectedKey = null;
+    setAddObstacleMode(false);
+    recompute();
+    renderPerformers();
+    renderTimelineStatic();
+    draw();
+  }
+
+  function removeObstacle(oid) {
+    state.obstacles = state.obstacles.filter(function (o) { return o.id !== oid; });
+    if (state.selectedObstacleId === oid) state.selectedObstacleId = null;
+    recompute();
+    renderTimelineStatic();
+    draw();
+  }
+
+  function getSelectedObstacle() {
+    if (!state.selectedObstacleId) return null;
+    return getObstacle(state.selectedObstacleId);
+  }
+
+  function renderObstacleEditor() {
+    var o = getSelectedObstacle();
+    if (!o) {
+      obstacleEditorEl.hidden = true;
+      return;
+    }
+    obstacleEditorEl.hidden = false;
+    oeInfoEl.textContent = o.name + ' · (' + Math.round(o.x) + ', ' + Math.round(o.y) + ')';
+    if (document.activeElement !== oeNameInput) oeNameInput.value = o.name;
+    if (document.activeElement !== oeWidthInput) oeWidthInput.value = Math.round(o.width);
+    if (document.activeElement !== oeHeightInput) oeHeightInput.value = Math.round(o.height);
+  }
+
+  oeNameInput.addEventListener('change', function () {
+    var o = getSelectedObstacle();
+    if (!o) return;
+    o.name = oeNameInput.value.trim() || o.name;
+    recompute();
+    draw();
+  });
+  oeNameInput.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
+
+  function commitObstacleSize() {
+    var o = getSelectedObstacle();
+    if (!o) return;
+    var w = Number(oeWidthInput.value);
+    var h = Number(oeHeightInput.value);
+    // 只提交正在编辑的那一维；留空/非法的一维保持原值
+    if (isFinite(w) && w >= 0 && oeWidthInput.value !== '') {
+      o.width = clamp(Math.round(w), 0, WORLD_W);
+    }
+    if (isFinite(h) && h >= 0 && oeHeightInput.value !== '') {
+      o.height = clamp(Math.round(h), 0, WORLD_H);
+    }
+    o.x = clamp(o.x, 0, Math.max(0, WORLD_W - o.width));
+    o.y = clamp(o.y, 0, Math.max(0, WORLD_H - o.height));
+    recompute();
+    draw();
+  }
+  oeWidthInput.addEventListener('change', commitObstacleSize);
+  oeHeightInput.addEventListener('change', commitObstacleSize);
+  oeDeleteBtn.addEventListener('click', function () {
+    if (state.selectedObstacleId) removeObstacle(state.selectedObstacleId);
+  });
+
   // ---------- 画布绘制 ----------
   function draw() {
     ctx.clearRect(0, 0, WORLD_W, WORLD_H);
@@ -368,6 +588,10 @@
 
     var t = state.time;
     var dangerIds = currentDangerIds(t);
+    var obsIntrude = currentObstacleIntruders(t);
+    Object.keys(obsIntrude).forEach(function (oid) {
+      obsIntrude[oid].forEach(function (pid) { dangerIds[pid] = true; });
+    });
 
     // 路径折线
     state.performers.forEach(function (p) {
@@ -382,6 +606,12 @@
     // 危险区间内：先画碰撞连线与红色半径盘
     drawCollisionLinks(t);
 
+    // 禁入矩形（在关键帧圆点之下、身体盘之下）
+    state.obstacles.forEach(function (o) {
+      drawObstacle(o, obsIntrude[o.id]);
+    });
+    drawObstacleDraft();
+
     // 关键帧圆点
     state.performers.forEach(function (p) {
       drawKeys(p);
@@ -394,6 +624,8 @@
     });
 
     renderKeyEditor();
+    renderObstacleEditor();
+    updateObstacleResultActive(t);
   }
 
   function drawGrid() {
@@ -557,6 +789,84 @@
       }
     });
     return map;
+  }
+
+  // 时刻 t 各禁入矩形的当前侵入者：{ obstacleId: [performerId...] }
+  function currentObstacleIntruders(t) {
+    var map = {};
+    if (!state.analysis) return map;
+    state.analysis.obstacleConflicts.forEach(function (entry) {
+      if (Core.isPerformerInObstacle(entry, entry.performerId, t)) {
+        (map[entry.obstacleId] = map[entry.obstacleId] || []).push(entry.performerId);
+      }
+    });
+    return map;
+  }
+
+  // ---------- 禁入矩形绘制 ----------
+  function drawObstacle(o, intruderIds) {
+    var intruding = intruderIds && intruderIds.length > 0;
+    var selected = o.id === state.selectedObstacleId;
+    ctx.save();
+    ctx.fillStyle = intruding ? 'rgba(248,81,73,0.20)' : 'rgba(139,152,165,0.13)';
+    ctx.fillRect(o.x, o.y, o.width, o.height);
+
+    // 斜纹（禁入语义）
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(o.x, o.y, o.width, o.height);
+    ctx.clip();
+    ctx.strokeStyle = intruding ? 'rgba(248,81,73,0.28)' : 'rgba(139,152,165,0.22)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([6, 6]);
+    for (var d = -o.height; d < o.width; d += 16) {
+      ctx.beginPath();
+      ctx.moveTo(o.x + d, o.y);
+      ctx.lineTo(o.x + d + o.height, o.y + o.height);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    ctx.setLineDash(intruding ? [] : [8, 5]);
+    ctx.lineWidth = intruding ? 3 : (selected ? 2.5 : 2);
+    ctx.strokeStyle = intruding ? '#f85149' : (selected ? '#58a6ff' : 'rgba(190,200,212,0.75)');
+    ctx.strokeRect(o.x + 0.5, o.y + 0.5, Math.max(0, o.width - 1), Math.max(0, o.height - 1));
+    ctx.setLineDash([]);
+
+    // 名称与当前侵入标注
+    ctx.font = 'bold 12px system-ui, sans-serif';
+    ctx.fillStyle = intruding ? '#ff8f8a' : 'rgba(230,237,243,0.9)';
+    var label = o.name;
+    ctx.fillText(label, o.x + 8, o.y + 18);
+    if (intruding) {
+      var names = intruderIds.map(function (pid) {
+        var p = getPerformer(pid);
+        return p ? p.name : pid;
+      }).join('、');
+      ctx.font = '11px system-ui, sans-serif';
+      ctx.fillStyle = '#ffb3ae';
+      ctx.fillText('⚠ 侵入：' + names, o.x + 8, o.y + o.height - 8);
+    }
+    ctx.restore();
+  }
+
+  // 新增禁入区拖框预览
+  function drawObstacleDraft() {
+    if (!state.drag || state.drag.type !== 'obs-new') return;
+    var d = state.drag;
+    var x = Math.min(d.x0, d.x1);
+    var y = Math.min(d.y0, d.y1);
+    var w = Math.abs(d.x1 - d.x0);
+    var h = Math.abs(d.y1 - d.y0);
+    ctx.save();
+    ctx.fillStyle = 'rgba(88,166,255,0.14)';
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = '#58a6ff';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([7, 5]);
+    ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+    ctx.setLineDash([]);
+    ctx.restore();
   }
 
   function drawCollisionLinks(t) {
@@ -826,6 +1136,74 @@
     });
   }
 
+  // ---------- 禁入区侵入结果 ----------
+  function renderObstacleResults() {
+    var panel = document.getElementById('panel-obstacles');
+    var box = document.getElementById('obstacle-results');
+    box.innerHTML = '';
+    if (!state.analysis || !state.obstacles.length) {
+      panel.hidden = true;
+      return;
+    }
+    panel.hidden = false;
+
+    state.analysis.obstacleConflicts.forEach(function (entry) {
+      var p = getPerformer(entry.performerId);
+      var row = document.createElement('div');
+      row.className = 'obs-row ' + (entry.conflict ? 'danger' : 'safe');
+      row.dataset.pid = entry.performerId;
+      row.dataset.oid = entry.obstacleId;
+
+      var badge = document.createElement('div');
+      badge.className = 'pair-badge';
+      badge.innerHTML =
+        '<span class="mini-dot" style="background:' + (p ? p.color : '#888') + '"></span>' +
+        escapeHtml(entry.performerName) +
+        '<span style="color:var(--text-dim)">▣</span>' +
+        '<span class="obs-name">' + escapeHtml(entry.obstacleName) + '</span>';
+
+      var status = document.createElement('div');
+      status.className = 'pair-status';
+      if (entry.conflict) {
+        var chips = entry.intervals.map(function (iv) {
+          return '<span class="iv-chip obs-chip t-jump" data-t="' + iv[0] +
+            '" title="点击跳到进入时刻 ' + fmt(iv[0]) + 's">' +
+            fmt(iv[0]) + ' – ' + fmt(iv[1]) + ' s</span>';
+        }).join('');
+        status.innerHTML =
+          '<b>侵入</b> · 首次进入 <span class="t-jump" data-t="' + entry.firstEntry +
+          '" title="点击跳到进入时刻"><b>' + fmt(entry.firstEntry) + '</b> s</span> · 共 ' +
+          entry.intervals.length + ' 段' +
+          '<div class="interval-chips">' + chips + '</div>';
+      } else {
+        status.innerHTML = '<b>安全</b> · 轨迹与实时半径全程不进入该禁入区';
+      }
+
+      row.appendChild(badge);
+      row.appendChild(status);
+      // 点击整行（含区间/首入时刻）跳到首次进入时刻
+      if (entry.conflict) {
+        row.addEventListener('click', function () {
+          seek(entry.firstEntry);
+        });
+      }
+      box.appendChild(row);
+    });
+    updateObstacleResultActive(state.time);
+  }
+
+  // 播放头移动时高亮当前正在侵入的结果行
+  function updateObstacleResultActive(t) {
+    if (!state.analysis) return;
+    var box = document.getElementById('obstacle-results');
+    state.analysis.obstacleConflicts.forEach(function (entry) {
+      var row = box.querySelector(
+        '.obs-row[data-pid="' + entry.performerId + '"][data-oid="' + entry.obstacleId + '"]');
+      if (!row) return;
+      row.classList.toggle('active-now', Core.isPerformerInObstacle(entry, entry.performerId, t));
+    });
+  }
+
   // ---------- 时间轴 ----------
   var timelineEl = document.getElementById('timeline');
   var lanesEl = document.getElementById('timeline-lanes');
@@ -920,6 +1298,26 @@
           bar.title = pair.aName + ' × ' + pair.bName + ' 碰撞 ' + iv[0].toFixed(2) + '–' + iv[1].toFixed(2) + 's';
           lane.appendChild(bar);
         });
+      });
+    });
+
+    // 禁入矩形侵入：当事人泳道叠加琥珀色条（点击跳到进入时刻）
+    state.analysis.obstacleConflicts.forEach(function (entry) {
+      if (!entry.conflict) return;
+      var lane = lanesEl.querySelector('.tl-lane[data-pid="' + entry.performerId + '"]');
+      if (!lane) return;
+      entry.intervals.forEach(function (iv) {
+        var bar = document.createElement('div');
+        bar.className = 'tl-danger tl-obstacle t-jump';
+        bar.style.left = tToX(iv[0], lw) + 'px';
+        bar.style.width = Math.max(2, tToX(iv[1] - iv[0], lw)) + 'px';
+        bar.title = entry.performerName + ' 侵入「' + entry.obstacleName + '」' +
+          iv[0].toFixed(2) + '–' + iv[1].toFixed(2) + 's（点击跳到进入时刻）';
+        bar.addEventListener('click', function (e) {
+          e.stopPropagation();
+          seek(iv[0]);
+        });
+        lane.appendChild(bar);
       });
     });
   }
@@ -1078,12 +1476,18 @@
     draw();
   });
 
-  // 键盘：空格播放/暂停，Delete 删选中帧
+  // 键盘：空格播放/暂停，Delete 删选中帧/禁入矩形，Esc 退出新增禁入区
   window.addEventListener('keydown', function (e) {
     if (e.target.tagName === 'INPUT') return;
     if (e.code === 'Space') {
       e.preventDefault();
       setPlaying(!state.playing);
+    } else if (e.code === 'Escape' && state.addObstacleMode) {
+      setAddObstacleMode(false);
+      state.drag = null;
+      draw();
+    } else if ((e.code === 'Delete' || e.code === 'Backspace') && state.selectedObstacleId) {
+      removeObstacle(state.selectedObstacleId);
     } else if ((e.code === 'Delete' || e.code === 'Backspace') && state.selectedKey) {
       removeKey(state.selectedKey.pid, state.selectedKey.index);
     }

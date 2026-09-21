@@ -153,3 +153,102 @@ test('GET /healthz 正常', async () => {
   assert.equal(r.status, 200);
   assert.equal(r.json.ok, true);
 });
+
+// ---------- 舞台禁入矩形 ----------
+
+test('POST /api/analyze：接受 obstacles 并返回规整后的 obstacles 与 obstacleConflicts', async () => {
+  const body = {
+    duration: 10,
+    obstacles: [
+      { name: '高台', x: 40, y: 40, width: 20, height: 20 },
+      { id: 'z9', x: 0, y: 0, width: 30, height: 30 }
+    ],
+    performers: [
+      { id: 'a', name: '甲', radius: 0, keys: [{ t: 0, x: 0, y: 50 }, { t: 10, x: 100, y: 50 }] },
+      { id: 'b', name: '乙', radius: 0, keys: [{ t: 0, x: 0, y: 200 }, { t: 10, x: 100, y: 200 }] }
+    ]
+  };
+  const r = await postAnalyze(body);
+  assert.equal(r.status, 200);
+  // 顶层与 scene 内均带规整后的 obstacles
+  assert.ok(Array.isArray(r.json.obstacles));
+  assert.equal(r.json.obstacles.length, 2);
+  assert.deepEqual(r.json.scene.obstacles, r.json.obstacles);
+  assert.ok(r.json.obstacles[0].id, '缺省 id 自动补全');
+  assert.equal(r.json.obstacles[0].name, '高台');
+  assert.equal(r.json.obstacles[1].id, 'z9', '显式 id 保留');
+  assert.equal(r.json.obstacles[1].name, '禁入区 2', '缺省 name 补序号');
+
+  // 每人 × 每矩形 = 4 条；甲横穿矩形 1（t∈[4,6]），其余安全
+  assert.equal(r.json.obstacleConflicts.length, 4);
+  const hit = r.json.obstacleConflicts.find(
+    (e) => e.performerId === 'a' && e.obstacleId === r.json.obstacles[0].id);
+  assert.equal(hit.conflict, true);
+  assert.ok(Math.abs(hit.intervals[0][0] - 4) < 1e-9);
+  assert.ok(Math.abs(hit.intervals[0][1] - 6) < 1e-9);
+  assert.ok(Math.abs(hit.firstEntry - 4) < 1e-9);
+  const safeOnes = r.json.obstacleConflicts.filter((e) => !e.conflict);
+  assert.equal(safeOnes.length, 3);
+  // 冲突项排在前且按首入升序
+  assert.equal(r.json.obstacleConflicts[0].conflict, true);
+  assert.ok(Math.abs(r.json.firstObstacleEntry - 4) < 1e-9);
+  assert.deepEqual(r.json.firstObstacleConflict, ['a', r.json.obstacles[0].id]);
+});
+
+test('POST /api/analyze：无 obstacles 的旧请求保持兼容（空数组与 null 场景字段）', async () => {
+  const r = await postAnalyze({
+    duration: 10,
+    performers: [
+      { name: 'a', radius: 10, keys: [{ t: 0, x: 0, y: 0 }, { t: 10, x: 100, y: 0 }] },
+      { name: 'b', radius: 10, keys: [{ t: 0, x: 100, y: 0 }, { t: 10, x: 0, y: 0 }] }
+    ]
+  });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.obstacles, []);
+  assert.deepEqual(r.json.obstacleConflicts, []);
+  assert.equal(r.json.firstObstacleEntry, null);
+  assert.equal(r.json.firstObstacleConflict, null);
+  assert.deepEqual(r.json.scene.obstacles, []);
+});
+
+test('POST /api/analyze：非法 obstacles（尺寸/字段）返回 400', async () => {
+  const base = {
+    duration: 10,
+    performers: [
+      { name: 'a', radius: 1, keys: [{ t: 0, x: 0, y: 0 }] },
+      { name: 'b', radius: 1, keys: [{ t: 0, x: 5, y: 5 }] }
+    ]
+  };
+  const badWidth = Object.assign({ obstacles: [{ x: 0, y: 0, width: -1, height: 10 }] }, base);
+  let r = await postAnalyze(badWidth);
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /禁入矩形/);
+
+  const badCoord = Object.assign({ obstacles: [{ x: 'nope', y: 0, width: 1, height: 1 }] }, base);
+  r = await postAnalyze(badCoord);
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /禁入矩形/);
+
+  const notArray = Object.assign({ obstacles: {} }, base);
+  r = await postAnalyze(notArray);
+  assert.equal(r.status, 400);
+});
+
+test('GET /api/sample：样例携带中央禁入矩形，回传分析得甲、乙侵入', async () => {
+  const s = await getJson('/api/sample');
+  assert.equal(s.status, 200);
+  assert.ok(Array.isArray(s.json.obstacles) && s.json.obstacles.length === 1);
+  const ob = s.json.obstacles[0];
+  ['id', 'name', 'x', 'y', 'width', 'height'].forEach((f) => assert.ok(ob[f] !== undefined));
+  const r = await postAnalyze({
+    duration: s.json.duration,
+    performers: s.json.performers,
+    obstacles: s.json.obstacles
+  });
+  assert.equal(r.status, 200);
+  const who = r.json.obstacleConflicts
+    .filter((e) => e.conflict)
+    .map((e) => e.performerId)
+    .sort();
+  assert.deepEqual(who, ['p1', 'p2'], '仅横穿者甲、乙侵入中央禁入区');
+});

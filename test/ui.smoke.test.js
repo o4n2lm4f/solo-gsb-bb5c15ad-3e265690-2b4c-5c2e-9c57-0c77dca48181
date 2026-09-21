@@ -318,3 +318,142 @@ test('最小安全余量：摘要展示、逐对升序、点击余量时刻跳�
   );
   dom.window.close();
 });
+
+test('禁入区：启动即渲染中央矩形、侵入结果按首入排序且当前侵入高亮', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  // 面板可见，4 名表演者 × 1 矩形 = 4 行；侵入行在前（乙、甲），安全行在后
+  const panel = doc.getElementById('panel-obstacles');
+  assert.equal(panel.hidden, false);
+  const rows = [...panel.querySelectorAll('.obs-row')];
+  assert.equal(rows.length, 4);
+  const order = rows.map((r) => ({
+    pid: r.dataset.pid,
+    danger: r.classList.contains('danger')
+  }));
+  assert.deepEqual(order.slice(0, 2).map((o) => o.pid), ['p2', 'p1'], '按首次进入升序');
+  assert.ok(order.slice(0, 2).every((o) => o.danger));
+  assert.deepEqual(order.slice(2).map((o) => o.pid).sort(), ['p3', 'p4']);
+
+  // 首行展示首次进入时刻与侵入区间芯片，均标记可点击
+  assert.match(rows[0].textContent, /首次进入/);
+  assert.ok(rows[0].querySelectorAll('.obs-chip').length >= 1);
+
+  // t=5 时乙(4.15~7.85)、甲(4.91~7.09)都在侵入：两行 active-now
+  const timeInput = doc.getElementById('time-input');
+  timeInput.value = '5';
+  timeInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 10));
+  const active = [...panel.querySelectorAll('.obs-row.active-now')].map((r) => r.dataset.pid).sort();
+  assert.deepEqual(active, ['p1', 'p2'], 't=5 甲乙高亮为当前侵入');
+
+  // 时间轴当事人泳道出现琥珀色禁入条
+  assert.ok(doc.querySelectorAll('.tl-obstacle').length >= 2, '时间轴渲染禁入侵入条');
+  dom.window.close();
+});
+
+test('禁入区：点击侵入结果跳到进入时刻', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  const rows = [...doc.querySelectorAll('#panel-obstacles .obs-row.danger')];
+  const p2Row = rows.find((r) => r.dataset.pid === 'p2');
+  const expected = Number(p2Row.querySelector('.t-jump[data-t]').getAttribute('data-t'));
+  p2Row.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const tv = Number(doc.getElementById('time-input').value);
+  assert.ok(Math.abs(tv - expected) < 0.01, `播放头应跳到 ${expected}，实际 ${tv}`);
+
+  // 点区间芯片同样跳转
+  const chip = p2Row.querySelector('.obs-chip');
+  chip.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const tv3 = Number(doc.getElementById('time-input').value);
+  assert.ok(Math.abs(tv3 - expected) < 0.01);
+  dom.window.close();
+});
+
+test('禁入区：画布拖出新矩形、拖动移位、编辑尺寸、右键删除并重算', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+  const canvas = doc.getElementById('stage');
+
+  function pointer(type, x, y, button = 0) {
+    canvas.dispatchEvent(new window.MouseEvent(type, {
+      bubbles: true, cancelable: true, clientX: x, clientY: y, button
+    }));
+  }
+
+  // 进入新增模式后在空白角落拖一个 80×80 矩形（避开既有走位点与中央矩形）
+  const addBtn = doc.getElementById('btn-obstacle');
+  addBtn.click();
+  assert.match(addBtn.textContent, /取消/);
+  pointer('pointerdown', 30, 460);
+  pointer('pointermove', 120, 560);
+  pointer('pointerup', 120, 560);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.match(addBtn.textContent, /＋/, '提交后自动退出新增模式');
+
+  // 矩形数 1 -> 2；结果行 4 -> 8
+  const analysis = window.CollisionCore;
+  assert.ok(analysis, '引擎可用');
+  let rows = [...doc.querySelectorAll('#panel-obstacles .obs-row')];
+  assert.equal(rows.length, 8, '每人 × 2 矩形');
+
+  // 新矩形被选中，出现编辑条；改为更宽尺寸后重算
+  const editor = doc.getElementById('obstacle-editor');
+  assert.equal(editor.hidden, false, '新增后选中并显示矩形编辑条');
+  const wInput = doc.getElementById('oe-width');
+  wInput.value = '300';
+  wInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 10));
+  rows = [...doc.querySelectorAll('#panel-obstacles .obs-row')];
+  assert.equal(rows.length, 8);
+  assert.ok(rows.some((r) => r.classList.contains('danger')), '加宽后覆盖部分轨迹产生侵入');
+
+  // 拖动矩形（命中区域内部），位置改变后保持选中
+  pointer('pointerdown', 40, 470);
+  pointer('pointermove', 60, 490);
+  pointer('pointerup', 60, 490);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(editor.hidden, false);
+
+  // 右键删除（矩形已随拖动平移到 50,480 起），矩形回到 1 个、结果行 4 行
+  pointer('contextmenu', 90, 510, 2);
+  await new Promise((r) => setTimeout(r, 10));
+  rows = [...doc.querySelectorAll('#panel-obstacles .obs-row')];
+  assert.equal(rows.length, 4);
+  assert.equal(editor.hidden, true, '删除后编辑条隐藏');
+  dom.window.close();
+});
+
+test('禁入区：单击画布投放默认尺寸矩形，Esc 取消新增模式', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+  const canvas = doc.getElementById('stage');
+  function pointer(type, x, y) {
+    canvas.dispatchEvent(new window.MouseEvent(type, {
+      bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0
+    }));
+  }
+
+  const addBtn = doc.getElementById('btn-obstacle');
+  addBtn.click();
+  // Esc 取消，不产生矩形
+  window.dispatchEvent(new window.KeyboardEvent('keydown', { code: 'Escape', bubbles: true }));
+  assert.match(addBtn.textContent, /＋/);
+  let rows = [...doc.querySelectorAll('#panel-obstacles .obs-row')];
+  assert.equal(rows.length, 4);
+
+  // 重新进入模式，空白处单击（无拖动）投放默认尺寸
+  addBtn.click();
+  pointer('pointerdown', 820, 80);
+  pointer('pointerup', 820, 80);
+  await new Promise((r) => setTimeout(r, 10));
+  rows = [...doc.querySelectorAll('#panel-obstacles .obs-row')];
+  assert.equal(rows.length, 8);
+  dom.window.close();
+});

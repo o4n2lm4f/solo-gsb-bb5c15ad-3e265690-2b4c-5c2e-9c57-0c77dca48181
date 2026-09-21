@@ -34,6 +34,26 @@
  * 退化情形由同一公式/分支覆盖：相对静止（v = 0）或半径变化比相对运动快
  * （|v| ≤ |d|）时 m 单调，最小在端点；相对轨迹过原点（|u×v| = 0，距离
  * 可为零）时驻点即 |r| = 0 的尖点。同样全程解析，不做任何时间采样。
+ *
+ * ---------- 舞台禁入矩形（obstacles） ----------
+ *
+ * 场景可携带若干轴对齐矩形 obstacles（{id,name,x,y,width,height}）。
+ * 表演者仍视为半径 r(t) 的圆，侵入条件为圆与矩形膨胀边界相交：
+ *
+ *     dist(p(t), R) ≤ r(t)，
+ *     dist(p,R)² = clamp(x − [X0,X1])² + clamp(y − [Y0,Y1])²
+ *
+ * 即圆心在内部/四条边外带状区/四个角点象限共 3×3 区域中分别表现为
+ * 线性、单坐标二次、双坐标二次。对每段 p(t)=u+v t、r(t)=c+d t，
+ * 按四条边界线 X0/X1/Y0/Y1 与该段的交点把时间窗切成若干子段，
+ * 每个子段内最近点投影恒为同一形式（常数或一个坐标的仿射函数）：
+ *
+ *     qx(t) = ax·ux + bx·vx·t + cx，qy(t) 同式（ax,bx∈{0,1}，cx∈{−X1,0,−X0}）
+ *
+ * 于是 qx²+qy² ≤ (c+dt)² 仍是关于 t 的一般二次不等式，直接复用
+ * solveQuadraticLE 精确求解（含角点相切重根 = 零长度区间）。
+ * 子段区间经 mergeIntervals 合并：从矩形内部起步（t=0 即在内）得
+ * 以 0 为起点的区间，跨关键帧/跨子段的相接区间自动合并。
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
@@ -45,7 +65,8 @@
   'use strict';
 
   var EPS = 1e-9;          // 数值零容差
-  var MERGE_EPS = 1e-6;    // 区间合并间隙（秒）
+  var MERGE_EPS = 1e-6;    // 区间合并基础间隙（秒）
+  var MERGE_REL = 1e-9;    // 区间合并相对余量（跨段端点为各自钳制结果，随时间尺度放大）
 
   function clamp(x, lo, hi) {
     return Math.min(hi, Math.max(lo, x));
@@ -224,7 +245,9 @@
     for (var i = 1; i < sorted.length; i++) {
       var cur = sorted[i];
       var top = out[out.length - 1];
-      if (cur[0] <= top[1] + MERGE_EPS) {
+      // 跨关键帧边界两侧各自求根/钳制，允许与时刻尺度成比例的浮点间隙
+      var tol = MERGE_EPS + MERGE_REL * Math.max(Math.abs(top[1]), Math.abs(cur[0]), 1);
+      if (cur[0] <= top[1] + tol) {
         top[1] = Math.max(top[1], cur[1]);
       } else {
         out.push(cur.slice());
@@ -438,20 +461,48 @@
   }
 
   /**
-   * 分析整个场景：枚举全部 C(n,2) 双人组合。
-   * scene: { duration, performers:[performer...] }
+   * 分析整个场景：枚举全部 C(n,2) 双人组合，并对每位表演者 × 每个
+   * 禁入矩形连续求侵入区间。
+   * scene: { duration, performers:[performer...], obstacles?:[obstacle...] }
    * pairs 按最小安全余量升序（余量越小越危险，碰撞对自然排在安全对之前）。
+   * obstacleConflicts 按首次进入时刻升序（无侵入项排在其后），
+   * 另附场景级首次侵入 firstObstacleEntry 及其当事人/禁入区。
    */
   function analyzeScene(scene) {
     var duration = Number(scene.duration);
     if (!(duration > 0)) throw new Error('duration 必须为正数');
     var ps = scene.performers || [];
+    var obstacles = normalizeObstacles(scene.obstacles);
     var pairs = [];
     for (var i = 0; i < ps.length; i++) {
       for (var j = i + 1; j < ps.length; j++) {
         pairs.push(analyzePair(ps[i], ps[j], duration));
       }
     }
+
+    // 禁入矩形：每位表演者 × 每个矩形一条结果
+    var obstacleConflicts = [];
+    for (var oi = 0; oi < obstacles.length; oi++) {
+      for (var pi = 0; pi < ps.length; pi++) {
+        obstacleConflicts.push(analyzeObstacle(ps[pi], obstacles[oi], duration));
+      }
+    }
+    var firstObstacle = null;
+    obstacleConflicts.forEach(function (e) {
+      if (e.conflict && (!firstObstacle || e.firstEntry < firstObstacle.firstEntry)) {
+        firstObstacle = e;
+      }
+    });
+    obstacleConflicts.sort(function (a, b) {
+      if (a.conflict !== b.conflict) return a.conflict ? -1 : 1;
+      if (a.conflict) {
+        if (Math.abs(a.firstEntry - b.firstEntry) > EPS) return a.firstEntry - b.firstEntry;
+      }
+      // 同首入时刻或均无侵入：按矩形、当事人次序稳定排列
+      if (a.obstacleId !== b.obstacleId) return a.obstacleId < b.obstacleId ? -1 : 1;
+      if (a.performerId !== b.performerId) return a.performerId < b.performerId ? -1 : 1;
+      return 0;
+    });
 
     var collisions = pairs.filter(function (p) {
       return p.collision;
@@ -478,6 +529,12 @@
       duration: duration,
       pairCount: pairs.length,
       pairs: pairs,
+      obstacles: obstacles,
+      obstacleConflicts: obstacleConflicts,
+      firstObstacleEntry: firstObstacle ? firstObstacle.firstEntry : null,
+      firstObstacleConflict: firstObstacle
+        ? [firstObstacle.performerId, firstObstacle.obstacleId]
+        : null,
       firstContact: firstPair ? firstPair.firstContact : null,
       firstContactPair: firstPair
         ? [firstPair.aId, firstPair.bId]
@@ -506,6 +563,147 @@
     return false;
   }
 
+  // ---------- 舞台禁入矩形 ----------
+
+  var OBS_ID_PREFIX = 'o';
+
+  function nextObstacleId(existing) {
+    var used = {};
+    (existing || []).forEach(function (o) { used[o.id] = true; });
+    var id;
+    do {
+      id = OBS_ID_PREFIX + Math.random().toString(36).slice(2, 8);
+    } while (used[id]);
+    return id;
+  }
+
+  /**
+   * 规整禁入矩形：坐标/尺寸解析为有限数；width、height 钳为非负
+   * （允许 0 宽/高的退化矩形——分别退化为线段/点，分析器同样覆盖）。
+   * 缺省 id 时按 o1、o2… 生成；缺省 name 用"禁入区 N"。
+   * 返回 [{id,name,x,y,width,height}]
+   */
+  function normalizeObstacles(obstacles) {
+    var list = Array.isArray(obstacles) ? obstacles : [];
+    var out = [];
+    list.forEach(function (raw) {
+      if (!raw || typeof raw !== 'object') return;
+      var x = Number(raw.x);
+      var y = Number(raw.y);
+      var w = Number(raw.width);
+      var h = Number(raw.height);
+      if (![x, y, w, h].every(isFinite)) return;
+      var id = (raw.id === null || raw.id === undefined || raw.id === '')
+        ? nextObstacleId(out)
+        : String(raw.id);
+      var index = out.length + 1;
+      var name = (raw.name === null || raw.name === undefined || String(raw.name).trim() === '')
+        ? '禁入区 ' + index
+        : String(raw.name);
+      out.push({
+        id: id,
+        name: name,
+        x: x,
+        y: y,
+        width: Math.max(0, w),
+        height: Math.max(0, h)
+      });
+    });
+    return out;
+  }
+
+  /**
+   * 计算单个表演者对单个轴对齐禁入矩形的连续侵入时间区间。
+   * performer 与 analyzePair 入参同形（关键帧 r 缺省继承 radius）。
+   * 返回 {
+   *   performerId, performerName, obstacleId, obstacleName,
+   *   intervals:[[t0,t1],...],   // 已合并的精确侵入区间（相切为零长度点）
+   *   conflict,                  // intervals 是否非空
+   *   firstEntry, lastExit       // 首次进入 / 最后离开（无侵入为 null）
+   * }
+   */
+  function analyzeObstacle(performer, obstacle, duration) {
+    var durationNum = Number(duration);
+    if (!(durationNum > 0)) {
+      throw new Error('duration 必须为正数');
+    }
+    var baseR = Math.max(0, Number(performer.radius) || 0);
+    var segs = buildSegments(performer.keys, durationNum, baseR);
+
+    var X0 = obstacle.x;
+    var Y0 = obstacle.y;
+    var X1 = obstacle.x + obstacle.width;
+    var Y1 = obstacle.y + obstacle.height;
+
+    var raw = [];
+    segs.forEach(function (s) {
+      // 以四条边界线与本线段轨迹的交点切割时间窗；子段内最近点投影形式恒定
+      var cuts = [s.t0, s.t1];
+      var axes = [
+        { u: s.x0, v: s.vx, b0: X0, b1: X1 },
+        { u: s.y0, v: s.vy, b0: Y0, b1: Y1 }
+      ];
+      axes.forEach(function (ax) {
+        if (Math.abs(ax.v) < EPS) return;
+        [ax.b0, ax.b1].forEach(function (b) {
+          var tc = (b - ax.u) / ax.v;
+          if (tc > s.t0 + EPS && tc < s.t1 - EPS) cuts.push(tc);
+        });
+      });
+      cuts.sort(function (a, b) { return a - b; });
+
+      for (var ci = 0; ci < cuts.length - 1; ci++) {
+        var lo = cuts[ci];
+        var hi = cuts[ci + 1];
+        if (hi - lo < EPS) continue;
+        var mid = (lo + hi) / 2;
+        var qx, qy;
+        var xm = s.x0 + s.vx * mid;
+        var ym = s.y0 + s.vy * mid;
+        if (xm >= X0 && xm <= X1) qx = { u: 0, v: 0 };
+        else qx = { u: s.x0 - (xm < X0 ? X0 : X1), v: s.vx };
+        if (ym >= Y0 && ym <= Y1) qy = { u: 0, v: 0 };
+        else qy = { u: s.y0 - (ym < Y0 ? Y0 : Y1), v: s.vy };
+
+        // |最近点偏移|² = (qx.u+qx.v·t)² + (qy.u+qy.v·t)² ≤ (s.r0+s.vr·t)²
+        var vx2 = qx.v * qx.v;
+        var vy2 = qy.v * qy.v;
+        var A = vx2 + vy2 - s.vr * s.vr;
+        var B = 2 * (qx.u * qx.v + qy.u * qy.v - s.r0 * s.vr);
+        var C = qx.u * qx.u + qy.u * qy.u - s.r0 * s.r0;
+
+        var hits = solveQuadraticLE(A, B, C, lo, hi);
+        for (var i = 0; i < hits.length; i++) {
+          hits[i][0] = clamp(hits[i][0], lo, hi);
+          hits[i][1] = clamp(hits[i][1], lo, hi);
+          raw.push(hits[i]);
+        }
+      }
+    });
+
+    var intervals = mergeIntervals(raw);
+    return {
+      performerId: performer.id,
+      performerName: performer.name || performer.id,
+      obstacleId: obstacle.id,
+      obstacleName: obstacle.name,
+      intervals: intervals,
+      conflict: intervals.length > 0,
+      firstEntry: intervals.length ? intervals[0][0] : null,
+      lastExit: intervals.length ? intervals[intervals.length - 1][1] : null
+    };
+  }
+
+  /** 查询某表演者在时刻 t 是否侵入任一（或指定）禁入矩形（供画布高亮）。 */
+  function isPerformerInObstacle(entry, performerId, t) {
+    if (!entry || entry.performerId !== performerId || !entry.conflict) return false;
+    for (var i = 0; i < entry.intervals.length; i++) {
+      var iv = entry.intervals[i];
+      if (t + EPS >= iv[0] && t - EPS <= iv[1]) return true;
+    }
+    return false;
+  }
+
   /**
    * 内置交叉样例（4 人，时长 12s，世界 1000×600）：
    *  - 甲（水平横穿）与乙（竖直纵穿）路径十字交叉，在 t=6 同时到达交点 -> 相撞
@@ -513,11 +711,16 @@
    *    t=8 关键帧安全半径 20→60，表现到位后展开道具（占用范围线性张开），
    *    张开段与各路径仍保持安全间距
    *  - 丁起初与丙分离，约 t=2.6 起追上丙并保持贴近 -> 持续碰撞（相对静止退化段）
+   *  - 中央禁入矩形覆盖十字交点：甲、乙按实时安全半径先后进入（演示禁入区分析），
+   *    丙、丁错峰折线从对角掠过，不侵入
    */
   function builtinScene() {
     return {
       duration: 12,
       world: { width: 1000, height: 600 },
+      obstacles: [
+        { id: 'o1', name: '中央禁入区', x: 440, y: 240, width: 120, height: 120 }
+      ],
       performers: [
         {
           id: 'p1',
@@ -576,6 +779,9 @@
     analyzePair: analyzePair,
     analyzeScene: analyzeScene,
     isPerformerInCollision: isPerformerInCollision,
+    normalizeObstacles: normalizeObstacles,
+    analyzeObstacle: analyzeObstacle,
+    isPerformerInObstacle: isPerformerInObstacle,
     builtinScene: builtinScene
   };
 });

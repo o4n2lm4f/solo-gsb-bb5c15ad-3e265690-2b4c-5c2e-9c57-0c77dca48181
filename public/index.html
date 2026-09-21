@@ -16,6 +16,7 @@
       </div>
     </div>
     <div class="top-actions">
+      <button id="btn-obstacle" class="btn" title="在画布上拖出一个轴对齐禁入矩形（再点空白处单击可放默认尺寸）">＋ 禁入区</button>
       <button id="btn-sample" class="btn" title="载入内置路径交叉样例">重置样例</button>
       <button id="btn-clear" class="btn btn-ghost" title="清空全部走位点">清空</button>
     </div>
@@ -27,7 +28,7 @@
       <div class="panel">
         <div class="panel-head">
           <span>舞台（世界坐标 1000 × 600）</span>
-          <span class="hint">拖动圆点走位 · 双击空白加帧 · 右键圆点删帧 · 选中圆点可改安全半径（开伞/展道具）</span>
+          <span class="hint">拖动圆点走位 · 双击空白加帧 · 右键圆点删帧 · 选中圆点可改安全半径 · 拖动禁入区矩形移位 · 右键矩形删除</span>
         </div>
         <div class="canvas-wrap">
           <canvas id="stage" width="1000" height="600"></canvas>
@@ -43,6 +44,18 @@
             </label>
           </div>
           <div id="ke-hint" class="ke-hint">留空 = 继承表演者当前半径</div>
+        </div>
+        <div id="obstacle-editor" class="key-editor obstacle-editor" hidden>
+          <div class="ke-head">
+            <span id="oe-info" class="ke-info">禁入矩形</span>
+            <label class="ke-radius-edit">名称 <input id="oe-name" type="text" /></label>
+            <label class="ke-radius-edit">
+              宽 <input id="oe-width" type="number" min="0" step="1" />
+              高 <input id="oe-height" type="number" min="0" step="1" />
+            </label>
+            <button id="oe-delete" class="btn btn-mini" type="button" title="删除该禁入矩形">✕ 删除</button>
+          </div>
+          <div class="ke-hint">轴对齐矩形：表演者按实时安全半径视为圆，连续解析侵入区间（无帧抽样）</div>
         </div>
       </div>
 
@@ -118,6 +131,11 @@
             <strong id="sum-margin-who">—</strong>
           </div>
         </div>
+      </div>
+
+      <div class="panel panel-pairs" id="panel-obstacles" hidden>
+        <div class="panel-head"><span>禁入区侵入（按首次进入时刻升序 · 点击结果跳到进入时刻）</span></div>
+        <div id="obstacle-results" class="pair-list"></div>
       </div>
 
       <div class="panel panel-pairs">

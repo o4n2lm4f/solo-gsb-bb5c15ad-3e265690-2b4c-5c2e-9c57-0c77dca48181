@@ -425,3 +425,216 @@ test('analyzeScene：pairs 按最小安全余量升序，场景级 minMargin 与
   const firstSafe = r.pairs.findIndex((p) => !p.collision);
   assert.ok(r.pairs.slice(0, firstSafe === -1 ? r.pairs.length : firstSafe).every((p) => p.collision));
 });
+
+// ---------- 舞台禁入矩形 obstacles ----------
+
+const OB = { id: 'o1', name: '禁入区', x: 40, y: 40, width: 20, height: 20 };
+
+test('禁入矩形：零半径直线横穿，区间恰为边界交点（不采样）', () => {
+  // 沿 y=50 从 x=0 走到 x=100（t=0..10），矩形 [40,60]×[40,60]
+  const p = { id: 'a', name: '甲', radius: 0, keys: [{ t: 0, x: 0, y: 50 }, { t: 10, x: 100, y: 50 }] };
+  const r = core.analyzeObstacle(p, OB, T);
+  assert.equal(r.conflict, true);
+  assert.equal(r.intervals.length, 1);
+  approx(r.intervals[0][0], 4, 1e-9, '左边进入 t=4');
+  approx(r.intervals[0][1], 6, 1e-9, '右边离开 t=6');
+  approx(r.firstEntry, 4, 1e-9);
+  approx(r.lastExit, 6, 1e-9);
+  assert.equal(r.performerId, 'a');
+  assert.equal(r.obstacleId, 'o1');
+});
+
+test('禁入矩形：安全半径膨胀后提前进入、延后离开（单坐标二次）', () => {
+  // 同轨迹、半径 10：|x-50| 方向进入点 x=30 -> t=3
+  const p = { id: 'a', radius: 10, keys: [{ t: 0, x: 0, y: 50 }, { t: 10, x: 100, y: 50 }] };
+  const r = core.analyzeObstacle(p, OB, T);
+  approx(r.intervals[0][0], 3, 1e-9);
+  approx(r.intervals[0][1], 7, 1e-9);
+});
+
+test('禁入矩形：从矩形内部起步，区间以 t=0 开始', () => {
+  const p = { id: 'a', radius: 0, keys: [{ t: 0, x: 50, y: 50 }, { t: 10, x: 150, y: 50 }] };
+  const r = core.analyzeObstacle(p, OB, T);
+  assert.equal(r.conflict, true);
+  assert.equal(r.intervals.length, 1);
+  approx(r.intervals[0][0], 0, 1e-9, '开场即在矩形内');
+  approx(r.intervals[0][1], 1, 1e-9, 'x=50+10t 越右边界 60 于 t=1');
+
+  // 全程待在内部
+  const stay = core.analyzeObstacle({ id: 'b', radius: 5, keys: [{ t: 0, x: 50, y: 50 }] }, OB, T);
+  approx(stay.intervals[0][0], 0, 1e-9);
+  approx(stay.intervals[0][1], 12, 1e-9);
+});
+
+test('禁入矩形：仅角点相切记为零长度侵入区间（最近点为双坐标）', () => {
+  // 斜穿 x+y=140，距右上角 (60,60) 最近；半径 10√2 恰在垂足 (50+? ) 相切一次
+  // 轨迹 (20,120)->(120,20)，到 (60,60) 的垂足在线上且严格位于角象限
+  const rr = 10 * Math.SQRT2;
+  const p = { id: 'a', radius: rr, keys: [{ t: 0, x: 20, y: 120 }, { t: 10, x: 120, y: 20 }] };
+  const r = core.analyzeObstacle(p, OB, T);
+  assert.equal(r.conflict, true, '零长度相切也算侵入');
+  assert.equal(r.intervals.length, 1);
+  approx(r.intervals[0][0], r.intervals[0][1], 1e-9, '相切为零长度点');
+  approx(r.intervals[0][0], 5, 1e-9, 't=5 经过垂足');
+  // 半径略小则不接触
+  const near = core.analyzeObstacle(
+    { id: 'a2', radius: rr - 1e-6, keys: p.keys }, OB, T);
+  assert.equal(near.conflict, false, '角点距离大于半径不得误报');
+});
+
+test('禁入矩形：沿边外等距线擦边（投影落在边上）给有限相切宽度', () => {
+  // 水平 y=70、r=10：与顶边 y=60 的膨胀边界处处相切 -> 一段连续接触
+  const p = { id: 'a', radius: 10, keys: [{ t: 0, x: 0, y: 70 }, { t: 10, x: 100, y: 70 }] };
+  const r = core.analyzeObstacle(p, OB, T);
+  assert.equal(r.conflict, true);
+  approx(r.intervals[0][0], 4, 1e-9);
+  approx(r.intervals[0][1], 6, 1e-9);
+});
+
+test('禁入矩形：半径随时间变化，静止者张开到接触、收拢脱离', () => {
+  // 静止 (50,70)，距顶边 10；r:0@0 ->20@4，之后保持 20
+  const grow = {
+    id: 'a', radius: 0,
+    keys: [{ t: 0, x: 50, y: 70, r: 0 }, { t: 4, x: 50, y: 70, r: 20 }]
+  };
+  const r1 = core.analyzeObstacle(grow, OB, 8);
+  assert.equal(r1.conflict, true);
+  approx(r1.intervals[0][0], 2, 1e-9, 'r=5t 达到 10 时 t=2 进入');
+  approx(r1.intervals[0][1], 8, 1e-9, '张开后持续侵入到窗末');
+
+  // 收拢：r:20@2 ->0@6，接触脱离于 r=10 -> t=4
+  const shrink = {
+    id: 'a', radius: 0,
+    keys: [{ t: 0, x: 50, y: 70, r: 20 }, { t: 2, x: 50, y: 70, r: 20 }, { t: 6, x: 50, y: 70, r: 0 }]
+  };
+  const r2 = core.analyzeObstacle(shrink, OB, 8);
+  approx(r2.intervals[0][0], 0, 1e-9);
+  approx(r2.intervals[0][1], 4, 1e-9, '收拢到 r=10 时 t=4 脱离');
+});
+
+test('禁入矩形：跨关键帧的相接侵入区间合并为单段', () => {
+  // 用共线关键帧人为切段：匀速 y=50 横穿，与单段轨迹结果一致
+  const p1 = { id: 'a', radius: 0, keys: [{ t: 0, x: 0, y: 50 }, { t: 5, x: 50, y: 50 }, { t: 10, x: 100, y: 50 }] };
+  const p2 = { id: 'a', radius: 0, keys: [{ t: 0, x: 0, y: 50 }, { t: 10, x: 100, y: 50 }] };
+  const r1 = core.analyzeObstacle(p1, OB, T);
+  const r2 = core.analyzeObstacle(p2, OB, T);
+  assert.equal(r1.intervals.length, 1);
+  assert.equal(r2.intervals.length, 1);
+  approx(r1.intervals[0][0], r2.intervals[0][0], 1e-9);
+  approx(r1.intervals[0][1], r2.intervals[0][1], 1e-9);
+});
+
+test('禁入矩形：无冲突路径（含几何穿过但时刻/距离安全）', () => {
+  // y=75、r=10 全程距矩形 ≥15
+  const p = { id: 'a', radius: 10, keys: [{ t: 0, x: 0, y: 75 }, { t: 10, x: 100, y: 75 }] };
+  const r = core.analyzeObstacle(p, OB, T);
+  assert.equal(r.conflict, false);
+  assert.deepEqual(r.intervals, []);
+  assert.equal(r.firstEntry, null);
+  assert.equal(r.lastExit, null);
+});
+
+test('禁入矩形：与密集采样在多种随机化轨迹上完全一致（实现本身解析）', () => {
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const rnd = mulberry32(20260921);
+  function rc() { return Math.round(rnd() * 120) - 10; }
+  for (let trial = 0; trial < 40; trial++) {
+    const ob = { id: 'o', x: rc() + 20, y: rc() + 20, width: 20 + rnd() * 80, height: 20 + rnd() * 80 };
+    const nk = 1 + Math.floor(rnd() * 3);
+    const keys = [];
+    for (let i = 0; i <= nk; i++) {
+      keys.push({
+        t: Math.round((T * i) / nk * 10) / 10,
+        x: rc() + 40, y: rc() + 40,
+        r: rnd() < 0.5 ? null : Math.round(rnd() * 45)
+      });
+    }
+    const performer = { id: 'a', radius: Math.round(rnd() * 25), keys };
+    const res = core.analyzeObstacle(performer, ob, T);
+    const X1 = ob.x + ob.width, Y1 = ob.y + ob.height;
+    function truth(t) {
+      const st = core.stateAt(performer.keys, t, performer.radius);
+      const cx = Math.max(ob.x, Math.min(X1, st.x));
+      const cy = Math.max(ob.y, Math.min(Y1, st.y));
+      return Math.hypot(st.x - cx, st.y - cy) <= st.r + 1e-8;
+    }
+    // 区间自由端点（未被 [0,T] 钳制）必须恰在接触边界上
+    res.intervals.forEach((iv) => {
+      iv.forEach((t, k) => {
+        if ((k === 0 && t <= 1e-9) || (k === 1 && t >= T - 1e-9)) return;
+        const st = core.stateAt(performer.keys, t, performer.radius);
+        const cx = Math.max(ob.x, Math.min(X1, st.x));
+        const cy = Math.max(ob.y, Math.min(Y1, st.y));
+        const d = Math.hypot(st.x - cx, st.y - cy);
+        assert.ok(Math.abs(d - st.r) < 1e-5,
+          `trial${trial} 端点 t=${t} 应在边界：d=${d}, r=${st.r}`);
+      });
+    });
+    // 稠密采样逐一比对布尔侵入状态
+    for (let i = 0; i <= 4000; i++) {
+      const t = (T * i) / 4000;
+      const pred = res.intervals.some((iv) => t >= iv[0] - 1e-8 && t <= iv[1] + 1e-8);
+      assert.equal(pred, truth(t), `trial${trial} t=${t} 侵入状态不一致`);
+    }
+  }
+});
+
+test('normalizeObstacles：缺省 id/name、非法项过滤、负尺寸钳零', () => {
+  const list = core.normalizeObstacles([
+    { name: 'A', x: 1, y: 2, width: 30, height: 40 },
+    { x: 0, y: 0, width: -5, height: 10 },
+    { x: NaN, y: 0, width: 1, height: 1 },
+    null
+  ]);
+  assert.equal(list.length, 2, '非法对象被过滤');
+  assert.ok(list[0].id, '缺省 id 自动生成');
+  assert.equal(list[0].name, 'A');
+  assert.equal(list[1].name, '禁入区 2', '缺省名称带序号');
+  assert.equal(list[1].width, 0, '负宽度钳为 0');
+  // 退化矩形（0 宽）仍可分析：退化为线段
+  const r = core.analyzeObstacle(
+    { id: 'a', radius: 5, keys: [{ t: 0, x: 0, y: 5 }, { t: 10, x: 10, y: 5 }] },
+    list[1], T);
+  assert.equal(r.conflict, true);
+});
+
+test('analyzeScene：obstacleConflicts 为每人×每矩形，按首次进入升序且含场景级字段', () => {
+  const scene = core.builtinScene();
+  const r = core.analyzeScene(scene);
+  assert.equal(r.obstacles.length, 1);
+  assert.equal(r.obstacleConflicts.length, 4);
+  const conflicts = r.obstacleConflicts.filter((e) => e.conflict);
+  assert.deepEqual(conflicts.map((e) => e.performerId), ['p2', 'p1'], '首入升序：乙 4.15 < 甲 4.91');
+  const safe = r.obstacleConflicts.filter((e) => !e.conflict).map((e) => e.performerId).sort();
+  assert.deepEqual(safe, ['p3', 'p4'], '丙丁错峰折线不侵入中央禁入区');
+  for (let i = 1; i < conflicts.length; i++) {
+    assert.ok(conflicts[i].firstEntry >= conflicts[i - 1].firstEntry - 1e-12);
+  }
+  approx(r.firstObstacleEntry, conflicts[0].firstEntry, 1e-12);
+  assert.deepEqual(r.firstObstacleConflict, ['p2', 'o1']);
+
+  // 无 obstacles 旧场景完全兼容：字段为空数组/null
+  const old = core.analyzeScene({ duration: T, performers: scene.performers });
+  assert.deepEqual(old.obstacles, []);
+  assert.deepEqual(old.obstacleConflicts, []);
+  assert.equal(old.firstObstacleEntry, null);
+  assert.equal(old.firstObstacleConflict, null);
+});
+
+test('禁入矩形高亮查询 isPerformerInObstacle 容差与指定矩形一致', () => {
+  const entry = {
+    performerId: 'a', obstacleId: 'o', conflict: true,
+    intervals: [[2, 4], [6, 6]]
+  };
+  assert.equal(core.isPerformerInObstacle(entry, 'a', 3), true);
+  assert.equal(core.isPerformerInObstacle(entry, 'a', 6), true, '零长度相切点可被查到');
+  assert.equal(core.isPerformerInObstacle(entry, 'a', 5), false);
+  assert.equal(core.isPerformerInObstacle(entry, 'b', 3), false);
+});

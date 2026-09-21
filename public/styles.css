@@ -127,6 +127,55 @@ html, body {
 .ke-hint::before { content: "◎ "; color: var(--accent); }
 #ke-clear:disabled { opacity: .4; cursor: not-allowed; }
 
+/* 顶部工具栏的禁入区新增按钮激活态 */
+#btn-obstacle.active { background: #d29922; border-color: #d29922; color: #1a1206; font-weight: 600; }
+
+/* 选中禁入矩形的编辑条（琥珀色系，与关键帧编辑条区分） */
+.obstacle-editor {
+  border-color: rgba(210, 153, 34, .5);
+  background: rgba(210, 153, 34, .08);
+}
+.obstacle-editor .ke-hint::before { content: "▣ "; color: #d29922; }
+.obstacle-editor input[type="text"] { width: 110px; }
+
+/* 禁入区侵入结果行 */
+.obs-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid rgba(42, 50, 61, .5);
+  cursor: default;
+  font-variant-numeric: tabular-nums;
+}
+.obs-row:last-child { border-bottom: none; }
+.obs-row:hover { background: var(--bg-panel-2); }
+.obs-row.danger { cursor: pointer; }
+.obs-row .pair-status b { color: var(--danger); font-weight: 600; }
+.obs-row.safe .pair-status b { color: var(--ok); }
+.obs-row .obs-name { color: var(--text); font-weight: 500; }
+.obs-row.active-now { background: rgba(248, 81, 73, .14); box-shadow: inset 3px 0 0 var(--danger); }
+.obs-chip {
+  background: rgba(210, 153, 34, .18);
+  border-color: rgba(210, 153, 34, .5);
+  color: #e3b341;
+  cursor: pointer;
+}
+.obs-chip:hover { background: rgba(210, 153, 34, .3); }
+
+/* 时间轴禁入区侵入条（琥珀色，叠加在碰撞红条之上） */
+.tl-obstacle {
+  top: 2px;
+  height: 18px;
+  background: rgba(210, 153, 34, .22);
+  border-top: 1px solid rgba(227, 179, 65, .7);
+  border-bottom: 1px solid rgba(227, 179, 65, .7);
+  cursor: pointer;
+  pointer-events: auto;
+  z-index: 1;
+}
+.tl-obstacle:first-child { border-left: 1px solid rgba(227, 179, 65, .7); }
+
 /* 播放控制 */
 .transport { display: flex; align-items: center; gap: 8px; }
 .time-readout { color: var(--text-dim); display: flex; align-items: center; gap: 4px; }
