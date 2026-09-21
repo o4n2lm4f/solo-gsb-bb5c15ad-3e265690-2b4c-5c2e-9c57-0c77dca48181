@@ -153,3 +153,97 @@ test('GET /healthz 正常', async () => {
   assert.equal(r.status, 200);
   assert.equal(r.json.ok, true);
 });
+
+// ---------- 舞台禁入矩形 obstacles / obstacleConflicts ----------
+
+const obstacleScene = () => ({
+  duration: 10,
+  performers: [
+    { id: 'a', name: '甲', radius: 10, keys: [{ t: 0, x: 0, y: 150 }, { t: 10, x: 300, y: 150 }] },
+    { id: 'b', name: '乙', radius: 10, keys: [{ t: 0, x: 0, y: 450 }, { t: 10, x: 300, y: 450 }] }
+  ],
+  obstacles: [
+    { id: 'ob1', name: '布景A', x: 100, y: 100, width: 100, height: 100 }, // 甲 t∈[3,7]
+    { x: 60, y: 400, width: 60, height: 100 }                              // 乙 t∈[5/3,13/3]，缺省 id/name
+  ]
+});
+
+test('POST /api/analyze：返回规整 obstacles 与按首次进入排序的 obstacleConflicts', async () => {
+  const r = await postAnalyze(obstacleScene());
+  assert.equal(r.status, 200);
+
+  // 规整后的 obstacles：缺省 id/name 自动生成，数值化
+  assert.equal(r.json.obstacles.length, 2);
+  assert.deepEqual(r.json.obstacles[0], { id: 'ob1', name: '布景A', x: 100, y: 100, width: 100, height: 100 });
+  assert.equal(r.json.obstacles[1].id, 'ob2');
+  assert.equal(r.json.obstacles[1].name, '障碍2');
+  // scene 中同步规整，可直接回传
+  assert.deepEqual(r.json.scene.obstacles, r.json.obstacles);
+
+  // obstacleConflicts：仅侵入组合，按首次进入时刻升序
+  assert.equal(r.json.obstacleConflicts.length, 2);
+  const [c1, c2] = r.json.obstacleConflicts;
+  assert.equal(c1.performerId, 'b');
+  assert.equal(c1.obstacleId, 'ob2');
+  assert.equal(c1.performerName, '乙');
+  assert.ok(Math.abs(c1.firstEntry - 5 / 3) < 1e-6, `乙首次进入应≈1.6667，实际 ${c1.firstEntry}`);
+  assert.equal(c2.performerId, 'a');
+  assert.equal(c2.obstacleId, 'ob1');
+  assert.ok(Math.abs(c2.firstEntry - 3) < 1e-6);
+  assert.equal(c2.intervals.length, 1);
+  assert.ok(Math.abs(c2.intervals[0][0] - 3) < 1e-6);
+  assert.ok(Math.abs(c2.intervals[0][1] - 7) < 1e-6);
+  assert.ok(Math.abs(c2.lastExit - 7) < 1e-6);
+  assert.ok(c1.firstEntry <= c2.firstEntry, '按首次进入升序');
+});
+
+test('POST /api/analyze：旧请求无 obstacles 时 obstacleConflicts 为空（兼容）', async () => {
+  const r = await postAnalyze(baseScene());
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.obstacles, []);
+  assert.deepEqual(r.json.obstacleConflicts, []);
+  assert.deepEqual(r.json.scene.obstacles, []);
+  // 原有字段不受影响
+  assert.equal(r.json.pairCount, 1);
+  assert.ok(Math.abs(r.json.pairs[0].firstContact - 2.5) < 1e-6);
+});
+
+test('POST /api/analyze：非法禁入矩形被拒绝', async () => {
+  const negWidth = Object.assign(obstacleScene(), {
+    obstacles: [{ x: 0, y: 0, width: -5, height: 10 }]
+  });
+  let r = await postAnalyze(negWidth);
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /非负/);
+
+  const badX = Object.assign(obstacleScene(), {
+    obstacles: [{ x: 'oops', y: 0, width: 5, height: 10 }]
+  });
+  r = await postAnalyze(badX);
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /非数字/);
+
+  const notArray = Object.assign(obstacleScene(), { obstacles: 'junk' });
+  r = await postAnalyze(notArray);
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /obstacles/);
+});
+
+test('POST /api/analyze：禁入分析覆盖矩形内起步与可变半径（连续解析）', async () => {
+  const body = {
+    duration: 10,
+    performers: [
+      { id: 'a', name: '甲', radius: 0, keys: [{ t: 0, x: 150, y: 150 }] },              // 矩形内起步
+      { id: 'b', name: '乙', radius: 0, keys: [{ t: 0, x: 0, y: 0, r: 0 }, { t: 6, x: 0, y: 0, r: 60 }] } // 半径张开
+    ],
+    obstacles: [{ id: 'ob1', x: 100, y: 100, width: 100, height: 100 }, { id: 'ob2', x: 50, y: -10, width: 50, height: 20 }]
+  };
+  const r = await postAnalyze(body);
+  assert.equal(r.status, 200);
+  const inside = r.json.obstacleConflicts.find((c) => c.performerId === 'a');
+  assert.ok(Math.abs(inside.firstEntry - 0) < 1e-9, '矩形内起步首次进入为 0');
+  const grow = r.json.obstacleConflicts.find((c) => c.performerId === 'b' && c.obstacleId === 'ob2');
+  assert.ok(Math.abs(grow.firstEntry - 5) < 1e-6, '半径张开到 50 时进入');
+  // 甲 静止于 ob1 内 -> 整段 [0,10]
+  assert.ok(Math.abs(inside.intervals[0][1] - 10) < 1e-9);
+});

@@ -23,11 +23,13 @@ app.get('/api/sample', (_req, res) => {
 
 /**
  * 把入参场景规整为 API 出参形式：每个关键帧都带显式半径 r
- * （缺省继承的帧解析为表演者当前 radius），便于集成方直接消费。
+ * （缺省继承的帧解析为表演者当前 radius），obstacles 规整为
+ * {id,name,x,y,width,height}，便于集成方直接消费。
  */
-function resolveScene(duration, performers) {
+function resolveScene(duration, performers, obstacles) {
   return {
     duration: duration,
+    obstacles: core.normalizeObstacles(obstacles),
     performers: performers.map((p) => {
       const base = Math.max(0, Number(p.radius) || 0);
       const ks = core.normalizeKeys(p.keys, base);
@@ -49,11 +51,15 @@ function resolveScene(duration, performers) {
 
 /**
  * 场景碰撞分析（与前端同一份解析引擎，便于集成/校验）。
- * body: { duration, performers:[{name?,radius,keys:[{t,x,y,r?}]}] }
+ * body: { duration, performers:[{name?,radius,keys:[{t,x,y,r?}]}],
+ *         obstacles?: [{id?,name?,x,y,width,height}] }
  * 关键帧 r 为可选安全半径（开伞/展开道具），缺省继承表演者 radius。
  * 每对返回精确碰撞区间与最小安全余量 minMargin/minMarginT
  * （distance(t)-(rA+rB) 的连续全局最小值及发生时刻），pairs 按余量升序；
  * 场景级另附 minMargin/minMarginT/minMarginPair。
+ * obstacles 为可选舞台禁入矩形（轴对齐）：响应含规整后的 obstacles 与
+ * obstacleConflicts（表演者按实时安全半径视为圆，对矩形膨胀边界的精确
+ * 进入/离开区间，按首次进入时刻升序）；旧请求无 obstacles 时两者为空数组。
  */
 app.post('/api/analyze', (req, res) => {
   try {
@@ -67,6 +73,21 @@ app.post('/api/analyze', (req, res) => {
     if (performers.length < 2 || performers.length > 8) {
       return res.status(400).json({ error: '表演者人数需为 2～8 人' });
     }
+    if (scene.obstacles !== undefined && !Array.isArray(scene.obstacles)) {
+      return res.status(400).json({ error: 'obstacles 需为数组' });
+    }
+    const obstacles = Array.isArray(scene.obstacles) ? scene.obstacles : [];
+
+    obstacles.forEach((o, i) => {
+      ['x', 'y', 'width', 'height'].forEach((f) => {
+        if (!isFinite(Number(o && o[f]))) {
+          throw new Error(`第 ${i + 1} 个禁入矩形存在非法字段（${f} 非数字）`);
+        }
+      });
+      if (Number(o.width) < 0 || Number(o.height) < 0) {
+        throw new Error(`第 ${i + 1} 个禁入矩形宽高需为非负数`);
+      }
+    });
 
     performers.forEach((p, idx) => {
       if (!Array.isArray(p.keys) || p.keys.length === 0) {
@@ -92,8 +113,8 @@ app.post('/api/analyze', (req, res) => {
       });
     });
 
-    const result = core.analyzeScene({ duration, performers });
-    res.json(Object.assign({ scene: resolveScene(duration, performers) }, result));
+    const result = core.analyzeScene({ duration, performers, obstacles });
+    res.json(Object.assign({ scene: resolveScene(duration, performers, obstacles) }, result));
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

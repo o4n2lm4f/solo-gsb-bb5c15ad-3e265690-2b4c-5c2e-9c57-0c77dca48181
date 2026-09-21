@@ -308,7 +308,7 @@ input:focus { outline: none; border-color: var(--accent); }
 
 /* 逐对结果 */
 .pair-list { padding: 6px 0; max-height: 360px; overflow-y: auto; }
-.pair-row {
+.pair-row, .conflict-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -317,9 +317,9 @@ input:focus { outline: none; border-color: var(--accent); }
   cursor: pointer;
   font-variant-numeric: tabular-nums;
 }
-.pair-row:last-child { border-bottom: none; }
-.pair-row:hover { background: var(--bg-panel-2); }
-.pair-row.selected { background: rgba(88, 166, 255, .1); }
+.pair-row:last-child, .conflict-row:last-child { border-bottom: none; }
+.pair-row:hover, .conflict-row:hover { background: var(--bg-panel-2); }
+.pair-row.selected, .conflict-row.selected { background: rgba(88, 166, 255, .1); }
 .pair-badge {
   display: flex; align-items: center; gap: 5px;
   min-width: 118px;
@@ -342,6 +342,52 @@ input:focus { outline: none; border-color: var(--accent); }
   padding: 0 5px;
   margin: 1px 4px 1px 0;
 }
+
+/* 禁入矩形列表 */
+.obstacle-list { padding: 8px 12px; max-height: 220px; overflow-y: auto; }
+.obstacle-item {
+  padding: 6px;
+  border-radius: 7px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.obstacle-item:hover { background: var(--bg-panel-2); }
+.obstacle-item.selected { background: rgba(251, 146, 60, .12); border-color: rgba(251, 146, 60, .4); }
+.obs-main { display: flex; align-items: center; gap: 8px; }
+.obs-dot {
+  width: 12px; height: 12px; border-radius: 3px; flex: none;
+  background: rgba(251, 146, 60, .85);
+  border: 1px dashed rgba(251, 146, 60, .6);
+}
+.obs-name {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text);
+  font-size: 13px;
+  width: 100%;
+  padding: 2px 4px;
+  border-radius: 5px;
+}
+.obs-name:focus { background: #0d1117; border-color: var(--accent); }
+.obs-fields {
+  display: flex;
+  gap: 8px;
+  margin-top: 5px;
+  flex-wrap: wrap;
+}
+.obs-fields label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.obs-fields input { width: 52px; padding: 2px 5px; font-size: 12px; }
+
+/* 禁入分析结果 */
+.empty-hint { padding: 10px 14px; font-size: 12px; color: var(--text-dim); }
+.empty-hint.ok-text { color: var(--ok); }
+.conflict-row .pair-badge { min-width: 128px; }
 
 @media (max-width: 1080px) {
   .layout { grid-template-columns: 1fr; }

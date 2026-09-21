@@ -27,7 +27,7 @@
       <div class="panel">
         <div class="panel-head">
           <span>舞台（世界坐标 1000 × 600）</span>
-          <span class="hint">拖动圆点走位 · 双击空白加帧 · 右键圆点删帧 · 选中圆点可改安全半径（开伞/展道具）</span>
+          <span class="hint">拖动圆点走位 · 双击空白加帧 · 右键圆点删帧 · 拖动橙色矩形移动禁入区 · 选中圆点可改安全半径（开伞/展道具）</span>
         </div>
         <div class="canvas-wrap">
           <canvas id="stage" width="1000" height="600"></canvas>
@@ -87,6 +87,14 @@
         </div>
       </div>
 
+      <div class="panel">
+        <div class="panel-head">
+          <span>舞台禁入区（矩形障碍）</span>
+          <button id="btn-add-obstacle" class="btn btn-mini btn-primary">＋ 新增</button>
+        </div>
+        <div id="obstacles" class="obstacle-list"></div>
+      </div>
+
       <div class="panel panel-summary">
         <div class="summary-row">
           <div class="summary-item">
@@ -123,6 +131,11 @@
       <div class="panel panel-pairs">
         <div class="panel-head"><span>逐对结果（按最小安全余量升序）</span></div>
         <div id="pairs" class="pair-list"></div>
+      </div>
+
+      <div class="panel panel-pairs">
+        <div class="panel-head"><span>禁入分析（按首次进入时刻升序，点击跳转）</span></div>
+        <div id="obstacle-conflicts" class="pair-list"></div>
       </div>
     </aside>
   </main>

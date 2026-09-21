@@ -318,3 +318,99 @@ test('最小安全余量：摘要展示、逐对升序、点击余量时刻跳�
   );
   dom.window.close();
 });
+
+// ---------- 舞台禁入矩形：新增 / 拖动 / 高亮 / 点击跳转 ----------
+
+test('禁入矩形：样例载入障碍与冲突列表，点击结果跳转进入时刻', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  // 样例自带 1 个禁入矩形"布景平台"
+  assert.equal(doc.querySelectorAll('#obstacles .obstacle-item').length, 1);
+  assert.ok(doc.querySelector('#obstacles .obs-name').value.includes('布景'));
+
+  // 禁入分析：丙（≈5.50）/丁（≈5.64）/甲（≈8.45）三条冲突，按首次进入升序
+  const rows = [...doc.querySelectorAll('#obstacle-conflicts .conflict-row')];
+  assert.equal(rows.length, 3);
+  assert.ok(rows[0].textContent.includes('丙'), '首条应为丙（最早进入）');
+  assert.ok(rows[1].textContent.includes('丁'));
+  assert.ok(rows[2].textContent.includes('甲'));
+  assert.ok(rows[0].textContent.includes('首次进入'), '结果行展示进入时刻');
+  assert.ok(rows[0].querySelector('.t-jump'), '进入时刻可点击');
+
+  // 点击首条结果：播放头跳到首次进入时刻 ≈5.5，对应矩形被选中
+  rows[0].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const tv = Number(doc.getElementById('time-input').value);
+  assert.ok(Math.abs(tv - 5.5) < 0.01, `播放头应跳到 5.5，实际 ${tv}`);
+  assert.equal(doc.querySelectorAll('#obstacles .obstacle-item.selected').length, 1);
+  dom.window.close();
+});
+
+test('禁入矩形：新增按钮生成障碍并实时重算冲突', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  doc.getElementById('btn-add-obstacle').click();
+  await new Promise((r) => setTimeout(r, 10));
+
+  assert.equal(doc.querySelectorAll('#obstacles .obstacle-item').length, 2);
+  // 新障碍落在甲/乙路径上：冲突由 3 增至 5，且新障碍被选中
+  assert.equal(doc.querySelectorAll('#obstacle-conflicts .conflict-row').length, 5);
+  assert.equal(doc.querySelectorAll('#obstacles .obstacle-item.selected').length, 1);
+  dom.window.close();
+});
+
+test('禁入矩形：画布拖动矩形实时重算，拖离路径后冲突清空', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+  const canvas = doc.getElementById('stage');
+
+  function pointer(type, x, y) {
+    canvas.dispatchEvent(new window.MouseEvent(type, {
+      bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0
+    }));
+  }
+
+  // 样例障碍 ob1 在 (700,240,120,80)：按住 (710,250) 拖到 (60,60) -> 矩形移到 (50,50)
+  pointer('pointerdown', 710, 250);
+  pointer('pointermove', 60, 60);
+  pointer('pointerup', 60, 60);
+  await new Promise((r) => setTimeout(r, 10));
+
+  const item = doc.querySelector('#obstacles .obstacle-item');
+  assert.equal(item.querySelector('.obs-x').value, '50', '拖动后 x 读数同步');
+  assert.equal(item.querySelector('.obs-y').value, '50', '拖动后 y 读数同步');
+  // 左上角不在任何路径上：冲突清空并显示安全提示
+  assert.equal(doc.querySelectorAll('#obstacle-conflicts .conflict-row').length, 0);
+  assert.match(doc.getElementById('obstacle-conflicts').textContent, /全程无人侵入/);
+  dom.window.close();
+});
+
+test('禁入矩形：修改宽高输入立即重算，右键矩形可删除', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+  const canvas = doc.getElementById('stage');
+
+  // 把样例矩形高度改为 20（y∈[240,260]）：甲/丁不再侵入，仅丙仍擦过
+  const hInput = doc.querySelector('#obstacles .obstacle-item .obs-h');
+  hInput.value = '20';
+  hInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 10));
+  let rows = [...doc.querySelectorAll('#obstacle-conflicts .conflict-row')];
+  assert.equal(rows.length, 1, '改小高度后只剩丙侵入');
+  assert.ok(rows[0].textContent.includes('丙'));
+  assert.ok(!rows.some((r) => r.textContent.includes('甲·横贯')));
+
+  // 右键点在矩形上：删除该禁入矩形
+  canvas.dispatchEvent(new window.MouseEvent('contextmenu', {
+    bubbles: true, cancelable: true, clientX: 710, clientY: 250, button: 2
+  }));
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(doc.querySelectorAll('#obstacles .obstacle-item').length, 0);
+  assert.match(doc.getElementById('obstacle-conflicts').textContent, /未设置禁入矩形/);
+  dom.window.close();
+});

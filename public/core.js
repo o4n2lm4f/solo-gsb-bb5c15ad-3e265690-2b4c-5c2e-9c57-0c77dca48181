@@ -34,6 +34,14 @@
  * 退化情形由同一公式/分支覆盖：相对静止（v = 0）或半径变化比相对运动快
  * （|v| ≤ |d|）时 m 单调，最小在端点；相对轨迹过原点（|u×v| = 0，距离
  * 可为零）时驻点即 |r| = 0 的尖点。同样全程解析，不做任何时间采样。
+ *
+ * 舞台禁入矩形：场景可含 obstacles（轴对齐矩形）。把表演者按实时安全半径
+ * 视为圆，圆心进入"矩形 ⊕ 半径 R(t) 圆盘"（圆角矩形膨胀边界）即侵入。
+ * 每段内该条件分解为：上下/左右边条带（关于 t 的线性不等式组，半径随时间
+ * 线性变化时仍是线性的）与四个角点圆盘（|p(t) − corner| ≤ R(t)，与双人
+ * 碰撞同型的一般二次不等式），并集即本段精确进入/离开区间；跨关键帧合并，
+ * 覆盖矩形内起步、仅角点相切（零长度区间）、半径随时间变化等情形，
+ * 全程无帧抽样。
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
@@ -437,10 +445,200 @@
     };
   }
 
+  /* ================= 舞台禁入矩形（轴对齐障碍）连续侵入分析 ================= */
+
+  /**
+   * 规整障碍矩形：x/y 必须有限（非法条目丢弃），宽高钳为非负，
+   * 缺省 id/name 自动生成。返回 [{id, name, x, y, width, height}, ...]
+   */
+  function normalizeObstacles(obstacles) {
+    return (obstacles || [])
+      .map(function (o, i) {
+        o = o || {};
+        return {
+          id: o.id !== undefined && o.id !== null && o.id !== '' ? String(o.id) : 'ob' + (i + 1),
+          name: o.name !== undefined && o.name !== null && o.name !== '' ? String(o.name) : '障碍' + (i + 1),
+          x: Number(o.x),
+          y: Number(o.y),
+          width: Number(o.width),
+          height: Number(o.height)
+        };
+      })
+      .filter(function (o) {
+        return isFinite(o.x) && isFinite(o.y);
+      })
+      .map(function (o) {
+        if (!isFinite(o.width) || o.width < 0) o.width = 0;
+        if (!isFinite(o.height) || o.height < 0) o.height = 0;
+        return o;
+      });
+  }
+
+  /** 线性不等式 a + b·t ≥ 0 在 [lo, hi] 上的解区间（空集返回 null）。 */
+  function solveLinearGE(a, b, lo, hi) {
+    if (Math.abs(b) < EPS) {
+      return a >= -EPS ? [lo, hi] : null;
+    }
+    var root = -a / b;
+    if (b > 0) {
+      // t ≥ root
+      if (root > hi + EPS) return null;
+      return [Math.max(lo, root), hi];
+    }
+    // t ≤ root
+    if (root < lo - EPS) return null;
+    return [lo, Math.min(hi, root)];
+  }
+
+  /** 两个单区间求交（容差内相接视为相交，退化为零长度区间）。 */
+  function intersectInterval1(a, b) {
+    if (!a || !b) return null;
+    var l = Math.max(a[0], b[0]);
+    var h = Math.min(a[1], b[1]);
+    if (h >= l - EPS) return [l, Math.max(l, h)];
+    return null;
+  }
+
+  /**
+   * 单个线性段（位置 p(t) = (x0+vx·t, y0+vy·t)、半径 R(t) = r0+vr·t 均为
+   * t 的一次函数）与轴对齐矩形膨胀边界的连续进入/离开区间。
+   *
+   * 侵入 ⟺ 圆心进入"矩形 ⊕ 半径 R(t) 圆盘"（圆角矩形），分解为：
+   *   上下边条带：px ∈ [ox, ox+w] 且 py ∈ [oy−R, oy+h+R]  —— 线性不等式组
+   *   左右边条带：py ∈ [oy, oy+h] 且 px ∈ [ox−R, ox+w+R]  —— 线性不等式组
+   *   四个角点圆盘：|p(t) − corner| ≤ R(t)                —— 一般二次不等式
+   * （半径随时间线性变化时，条带条件关于 t 仍是线性的；角点条件与双人碰撞
+   * 同型，复用 solveQuadraticLE。）三者并集即本段全部侵入区间；
+   * 矩形内起步（条带整段成立）与仅角点相切（零长度区间）都被自然覆盖。
+   */
+  function segmentRectIntrusion(seg, rect, lo, hi) {
+    var ox = rect.x;
+    var oy = rect.y;
+    var ow = rect.width;
+    var oh = rect.height;
+    var x0 = seg.x0;
+    var y0 = seg.y0;
+    var vx = seg.vx;
+    var vy = seg.vy;
+    var r0 = seg.r0;
+    var vr = seg.vr;
+    var out = [];
+
+    // 条带：conds 为 [a, b] 列表，全部满足 a + b·t ≥ 0 的 t 区间
+    function strip(conds) {
+      var cur = [lo, hi];
+      for (var i = 0; i < conds.length; i++) {
+        cur = intersectInterval1(cur, solveLinearGE(conds[i][0], conds[i][1], lo, hi));
+        if (!cur) return;
+      }
+      out.push(cur);
+    }
+
+    // 上下边条带（含矩形本体竖列）：px 在矩形 x 范围内，py 距矩形 ≤ R
+    strip([
+      [x0 - ox, vx],                 // px ≥ ox
+      [ox + ow - x0, -vx],           // px ≤ ox + w
+      [y0 + r0 - oy, vy + vr],       // py + R ≥ oy
+      [oy + oh + r0 - y0, vr - vy]   // py − R ≤ oy + h
+    ]);
+    // 左右边条带：py 在矩形 y 范围内，px 距矩形 ≤ R
+    strip([
+      [y0 - oy, vy],                 // py ≥ oy
+      [oy + oh - y0, -vy],           // py ≤ oy + h
+      [x0 + r0 - ox, vx + vr],       // px + R ≥ ox
+      [ox + ow + r0 - x0, vr - vx]   // px − R ≤ ox + w
+    ]);
+
+    // 四角点圆盘：|u + v·t| ≤ R(t) —— 与双人碰撞同型的一般二次不等式
+    var corners = [
+      [ox, oy], [ox + ow, oy], [ox, oy + oh], [ox + ow, oy + oh]
+    ];
+    for (var ci = 0; ci < 4; ci++) {
+      var ux = x0 - corners[ci][0];
+      var uy = y0 - corners[ci][1];
+      var A = vx * vx + vy * vy - vr * vr;
+      var B = 2 * (ux * vx + uy * vy - r0 * vr);
+      var C = ux * ux + uy * uy - r0 * r0;
+      var hits = solveQuadraticLE(A, B, C, lo, hi);
+      for (var k = 0; k < hits.length; k++) out.push(hits[k]);
+    }
+    return out;
+  }
+
+  /**
+   * 表演者（按实时安全半径视为圆）与单个障碍矩形的连续侵入分析。
+   * 返回 {
+   *   performerId, performerName, obstacleId, obstacleName,
+   *   intervals: [[t0,t1],...],   // 合并后的精确进入/离开区间（跨关键帧已合并）
+   *   firstEntry, lastExit,       // 首次进入 / 最后离开时刻（无侵入为 null）
+   *   intrusion                   // 是否存在侵入
+   * }
+   */
+  function analyzeObstacleIntrusion(performer, obstacle, duration) {
+    var ob = normalizeObstacles([obstacle])[0];
+    var rb = Math.max(0, Number(performer.radius) || 0);
+    var empty = {
+      performerId: performer.id,
+      performerName: performer.name || performer.id,
+      obstacleId: ob ? ob.id : undefined,
+      obstacleName: ob ? ob.name : undefined,
+      intervals: [],
+      firstEntry: null,
+      lastExit: null,
+      intrusion: false
+    };
+    if (!ob) return empty; // 非法障碍（坐标非有限数）已被规整丢弃
+    var segs = buildSegments(performer.keys, duration, rb);
+    var raw = [];
+    for (var i = 0; i < segs.length; i++) {
+      var s = segs[i];
+      var hits = segmentRectIntrusion(s, ob, s.t0, s.t1);
+      for (var k = 0; k < hits.length; k++) raw.push(hits[k]);
+    }
+    var intervals = mergeIntervals(raw);
+    return {
+      performerId: performer.id,
+      performerName: performer.name || performer.id,
+      obstacleId: ob.id,
+      obstacleName: ob.name,
+      intervals: intervals,
+      firstEntry: intervals.length ? intervals[0][0] : null,
+      lastExit: intervals.length ? intervals[intervals.length - 1][1] : null,
+      intrusion: intervals.length > 0
+    };
+  }
+
+  /**
+   * 全场景禁入分析：枚举所有 表演者 × 障碍 组合，仅保留存在侵入的组合，
+   * 按首次进入时刻升序（并列时按障碍、表演者 id 字典序，保证确定性）。
+   */
+  function analyzeObstacles(performers, obstacles, duration) {
+    var out = [];
+    (obstacles || []).forEach(function (ob) {
+      (performers || []).forEach(function (p) {
+        var r = analyzeObstacleIntrusion(p, ob, duration);
+        if (r.intrusion) out.push(r);
+      });
+    });
+    out.sort(function (a, b) {
+      var d = a.firstEntry - b.firstEntry;
+      if (d) return d;
+      var ao = String(a.obstacleId);
+      var bo = String(b.obstacleId);
+      if (ao !== bo) return ao < bo ? -1 : 1;
+      var ap = String(a.performerId);
+      var bp = String(b.performerId);
+      if (ap !== bp) return ap < bp ? -1 : 1;
+      return 0;
+    });
+    return out;
+  }
+
   /**
    * 分析整个场景：枚举全部 C(n,2) 双人组合。
-   * scene: { duration, performers:[performer...] }
+   * scene: { duration, performers:[performer...], obstacles?:[obstacle...] }
    * pairs 按最小安全余量升序（余量越小越危险，碰撞对自然排在安全对之前）。
+   * obstacleConflicts 按首次进入时刻升序（仅含存在侵入的 表演者×障碍 组合）。
    */
   function analyzeScene(scene) {
     var duration = Number(scene.duration);
@@ -474,10 +672,17 @@
       return a.minMargin - b.minMargin;
     });
 
+    // 舞台禁入矩形：规整 obstacles 并求全部侵入冲突（按首次进入升序）；
+    // 旧场景无 obstacles 字段时得到空数组，保持兼容
+    var obstacles = normalizeObstacles(scene.obstacles);
+    var obstacleConflicts = analyzeObstacles(ps, obstacles, duration);
+
     return {
       duration: duration,
       pairCount: pairs.length,
       pairs: pairs,
+      obstacles: obstacles,
+      obstacleConflicts: obstacleConflicts,
       firstContact: firstPair ? firstPair.firstContact : null,
       firstContactPair: firstPair
         ? [firstPair.aId, firstPair.bId]
@@ -513,11 +718,16 @@
    *    t=8 关键帧安全半径 20→60，表现到位后展开道具（占用范围线性张开），
    *    张开段与各路径仍保持安全间距
    *  - 丁起初与丙分离，约 t=2.6 起追上丙并保持贴近 -> 持续碰撞（相对静止退化段）
+   *  - 舞台右下置一禁入矩形"布景平台"：丙（约 t=5.50 经角点圆盘进入）、
+   *    丁（约 t=5.64 经边条带进入）、甲（约 t=8.45 正面横穿）先后侵入
    */
   function builtinScene() {
     return {
       duration: 12,
       world: { width: 1000, height: 600 },
+      obstacles: [
+        { id: 'ob1', name: '布景平台', x: 700, y: 240, width: 120, height: 80 }
+      ],
       performers: [
         {
           id: 'p1',
@@ -574,6 +784,9 @@
     buildSegments: buildSegments,
     solveQuadraticLE: solveQuadraticLE,
     analyzePair: analyzePair,
+    normalizeObstacles: normalizeObstacles,
+    analyzeObstacleIntrusion: analyzeObstacleIntrusion,
+    analyzeObstacles: analyzeObstacles,
     analyzeScene: analyzeScene,
     isPerformerInCollision: isPerformerInCollision,
     builtinScene: builtinScene
